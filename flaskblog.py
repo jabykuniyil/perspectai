@@ -1,9 +1,12 @@
-from logging import log
-from flask import Flask, request, jsonify
+from functools import wraps
+from flask import Flask, request, jsonify, make_response
 from flask_sqlalchemy import SQLAlchemy
-# from werkzeug.security import generate_password_hash, check_password_hash
+from werkzeug.security import generate_password_hash, check_password_hash
+import datetime, jwt, secrets
 
 app = Flask(__name__)
+generated_key = secrets.token_urlsafe(50)
+app.config['SECRET_KEY'] = generated_key
 app.config['SQLALCHEMY_DATABASE_URI'] = 'postgresql://postgres:jaby@localhost/perspectai'
 db = SQLAlchemy(app)
 
@@ -27,18 +30,48 @@ class Blog(db.Model):
 @app.route('/', methods=['POST'])
 def create_account():
     user_data = request.get_json()
-    user = Account(username=user_data['username'], full_name=user_data['full_name'], password_hash=user_data['password_hash'])
+    user = Account(username=user_data['username'], full_name=user_data['full_name'], password_hash=generate_password_hash(user_data['password_hash']))
     db.session.add(user)
     db.session.commit()
     return 'Account created Successfully'
 
+def check_for_token(func):
+    @wraps(func)
+    def wrapped(*args, **kwargs):
+        token = None
+        if 'x-access-token' in request.headers:
+            token = request.headers['x-access-token']
+        if not token:
+            return jsonify({'message' : 'missing token'}), 403
+        try:
+            data = jwt.decode(token, generated_key)
+            current_user = Account.query.filter_by(username=data['username']).first()
+        except:
+            print(token)
+            return jsonify({'message' : 'invalid token'}), 403
+        return func(current_user, *args, **kwargs)
+    return wrapped
+
 @app.route('/login', methods=['POST'])
 def login():
-    login_credential = request.get_json()
-    return login_credential
+    auth = request.authorization
+    # if not auth or not auth.username or not auth.password:
+    #     return make_response('Could not verify', 401, {'WWW-Authenticate' : 'Basic realm="Login required!"'})
+    
+    user = Account.query.filter_by(username=request.json['username']).first()
+    if not user:
+        return make_response('Could not verify', 401, {'WWW-Authenticate' : 'Basic realm="Login required!"'})
+    
+    if check_password_hash(user.password_hash, request.json['password_hash']):
+        token = jwt.encode({'username' : user.username, 'exp' : datetime.datetime.utcnow() + datetime.timedelta(minutes=30)}, app.config['SECRET_KEY'])
+        print(token.encode().decode('utf-8'))
+        return jsonify({'token' : token.encode().decode('utf-8')})
+    
+    return make_response('Could not verify', 401, {'WWW-Authenticate' : 'Basic realm="Login required!"'})
     
 @app.route('/blogs', methods=['GET', 'POST'])
-def home():
+@check_for_token
+def home(current_user):
     if request.method == 'POST':
         blog_data = request.get_json()
         blog = Blog(post=blog_data['post'])
@@ -55,7 +88,8 @@ def home():
 
 
 @app.route('/blog/<int:id>', methods=['GET', 'PUT', 'DELETE'])
-def single_blog(id):
+@check_for_token
+def single_blog(current_user, id):
     blog = db.session.query(Blog).filter_by(id=id).first()
     curr_blog = {}
     if blog is not None:
