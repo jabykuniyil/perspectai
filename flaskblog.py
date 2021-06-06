@@ -23,6 +23,8 @@ class Account(db.Model):
 class Blog(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     post = db.Column(db.String(200))
+    image = db.Column(db.LargeBinary)
+
     
     def __init__(self, post):
         self.post = post
@@ -30,10 +32,23 @@ class Blog(db.Model):
 @app.route('/', methods=['POST'])
 def create_account():
     user_data = request.get_json()
-    user = Account(username=user_data['username'], full_name=user_data['full_name'], password_hash=generate_password_hash(user_data['password_hash']))
+    user = Account(username=user_data['username'], full_name=user_data['full_name'], password_hash=generate_password_hash(user_data['password_hash'], method='sha256'))
     db.session.add(user)
     db.session.commit()
-    return 'Account created Successfully'
+    return jsonify({
+        'message' : 'New User created successfully'
+    })
+    
+@app.route('/users', methods=['GET'])
+def all_users():
+    users = Account.query.all()
+    output = []
+    for x in users:
+        user = {}
+        user['full_name'] = x.full_name
+        user['username'] = x.username
+        output.append(user)
+    return jsonify({'users' : output})
 
 def check_for_token(func):
     @wraps(func)
@@ -42,30 +57,31 @@ def check_for_token(func):
         if 'x-access-token' in request.headers:
             token = request.headers['x-access-token']
         if not token:
-            return jsonify({'message' : 'missing token'}), 403
+            return jsonify({'message' : 'missing token'}), 401
         try:
             data = jwt.decode(token, generated_key)
             current_user = Account.query.filter_by(username=data['username']).first()
         except:
-            print(token)
-            return jsonify({'message' : 'invalid token'}), 403
+            return jsonify({'message' : 'invalid token'}), 401
         return func(current_user, *args, **kwargs)
     return wrapped
 
-@app.route('/login', methods=['POST'])
+@app.route('/login', methods=['GET'])
 def login():
     auth = request.authorization
-    # if not auth or not auth.username or not auth.password:
-    #     return make_response('Could not verify', 401, {'WWW-Authenticate' : 'Basic realm="Login required!"'})
+    if not auth or not auth.username or not auth.password:
+        return make_response('Could not verify', 401, {'WWW-Authenticate' : 'Basic realm="Login required!"'})
     
-    user = Account.query.filter_by(username=request.json['username']).first()
+    user = Account.query.filter_by(username=auth.username).first()
     if not user:
         return make_response('Could not verify', 401, {'WWW-Authenticate' : 'Basic realm="Login required!"'})
     
-    if check_password_hash(user.password_hash, request.json['password_hash']):
-        token = jwt.encode({'username' : user.username, 'exp' : datetime.datetime.utcnow() + datetime.timedelta(minutes=30)}, app.config['SECRET_KEY'])
-        print(token.encode().decode('utf-8'))
-        return jsonify({'token' : token.encode().decode('utf-8')})
+    if check_password_hash(user.password_hash, auth.password):
+        token = jwt.encode({
+            'username' : user.username,
+            'exp' : datetime.datetime.utcnow() + datetime.timedelta(minutes=30)
+            }, app.config['SECRET_KEY'])
+        return jsonify({'token' : token.decode()})
     
     return make_response('Could not verify', 401, {'WWW-Authenticate' : 'Basic realm="Login required!"'})
     
@@ -102,10 +118,12 @@ def single_blog(current_user, id):
             blog.post = curr_blog['post']
             db.session.commit()
             return curr_blog         
-        else:
+        elif request.method == 'DELETE':
             Blog.query.filter_by(id=id).delete()
             db.session.commit()
             return "Your blog has been deleted", 201
+        else:
+            return jsonify({'message' : 'method doesn"t support'})
     return "url doesn't exists", 404
             
     
